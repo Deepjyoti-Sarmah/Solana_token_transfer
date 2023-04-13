@@ -52,7 +52,6 @@ const HomePage = () => {
 
                 </form>
             </div >
-
         </>
     )
 }
