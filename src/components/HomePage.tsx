@@ -242,8 +242,199 @@ export const HomePage: FC = () => {
         setOpen(false);
     };
 
-    
+    function confirmAction() {
+        return new Promise((resolve, reject) => {
+            const modalRoot = document.createElement('div');
+            modalRoot.style.cssText = 
+                'position: fixed; top:0; left:0; width: 100%; height: 100%; z-index: 9999; display: flex; justify-content:center; align-items: center; background-color: rgba(0, 0, 0, 0.5);';
 
+            const modalContent = document.createElement('div');
+            modalContent.style.cssText =
+                'background-color: #212121; padding: 24px; border-radius: 8px; width: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);';
+
+            const message = document.createElement('p');
+            message.style.cssText = 'color: #FF0000; margin: 0 0 16px 0; font-size: 1.2rem;';
+            message.textContent =
+                'The recipient wallet address does not have an account for this token. Would you like to create it for them?';
+
+            const buttonWrapper = document.createElement('div');
+            buttonWrapper.style.cssText = 'display: flex; justify-content: flex-end;';
+
+            const confirmButton = document.createElement('button');
+            confirmButton.style.cssText =
+                'background-color: #48C1F7; color: #1E1E1E; padding: 12px 24px; border-radius: 8px; margin-right: 16px; cursor: pointer; font-size: 1.2rem; border: none; outline: none;';
+            confirmButton.textContent = 'Yes';
+
+            const cancelButton = document.createElement('button');
+            cancelButton.style.cssText =
+                'background-color: #48C1F7; color: #1E1E1E; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 1.2rem; border: none; outline: none;';
+            cancelButton.textContent = 'No';
+
+            modalRoot.addEventListener('click', () => {
+                reject('Action cancelled.');
+                document.body.removeChild(modalRoot);
+            });
+
+            modalContent.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+
+            confirmButton.addEventListener('click', () => {
+                resolve(true);
+                document.body.removeChild(modalRoot);
+            });
+
+            cancelButton.addEventListener('click', () => {
+                reject('Action cancelled.');
+                document.body.removeChild(modalRoot);
+            });
+
+            modalContent.appendChild(message);
+            buttonWrapper.appendChild(confirmButton);
+            buttonWrapper.appendChild(cancelButton);
+            modalContent.appendChild(buttonWrapper);
+            modalRoot.appendChild(modalContent);
+            document.body.appendChild(modalRoot);
+        });
+    }
+
+    const sendAndConfirmTransaction = async (transaction: any, connection: any) => {
+        try {
+            const signature = await sendTransaction(transaction, connection);
+            setStatus({
+                status: 'pending',
+                severity: 'info',
+                message: `Transaction sent for ID ${signature}!`,
+            });
+            console.log('Transaction sent:', signature);
+            const latestBlockHash = await connection.getLatestBlockhash();
+            const confirmation = await connection.confirmTransaction({
+                blockhash: latestBlockHash.blockhash,
+                lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
+                signature: signature,
+            });
+            if (confirmation) {
+                setStatus({
+                    status: 'success',
+                    severity: 'success',
+                    message: `Transaction confirmed for ID ${signature}!`,
+                });
+                setSignature(signature);
+            }
+        } catch (error) {
+            setStatus({
+                status: 'error',
+                severity: 'error',
+                message: `Transaction failed!`,
+            });
+        }
+    };
+
+    const Transact = async () => {
+        //Transaction For SOL Native Token
+        if (selectedToken.mintAddress === SOL) {
+            try {
+                if (!publicKey) throw new WalletNotConnectedError();
+                const balance = await connection.getBalance(publicKey);
+                console.log(balance / LAMPORTS_PER_SOL);
+                const toPublicKey = new PublicKey(walletAddress);
+                console.log(parseFloat(amount) * LAMPORTS_PER_SOL);
+                const transaction = new Transaction().add(
+                    SystemProgram.transfer({
+                        fromPubkey: publicKey,
+                        toPubkey: toPublicKey,
+                        lamports: parseFloat(amount) * LAMPORTS_PER_SOL, // 1 SOL = 1 billion lamports
+                    })
+                );
+                await sendAndConfirmTransaction(transaction, connection);
+            } catch (error) {
+                setStatus({
+                    status: 'error',
+                    severity: 'error',
+                    message: `Transaction failed!`,
+                });
+            }
+        } else {
+            //Transaction For SPL-Token
+            try {
+                if (!publicKey) throw new WalletNotConnectedError();
+                let sourceAccount = await getOrCreateAssociatedTokenAccount(
+                    connection,
+                    Keypair.generate(),
+                    new PublicKey(selectedToken.mintAddress),
+                    publicKey
+                );
+                console.log(`Source Account: ${sourceAccount.address.toString()}`);
+                try {
+                    let destinationAccount = await getOrCreateAssociatedTokenAccount(
+                        connection,
+                        Keypair.generate(),
+                        new PublicKey(selectedToken.mintAddress),
+                        new PublicKey(walletAddress)
+                    );
+                    console.log(`Destination Account: ${destinationAccount.address.toString()}`);
+                    //send transaction directly now
+                    const transaction = new Transaction();
+                    transaction.add(
+                        createTransferInstruction(
+                            sourceAccount.address,
+                            destinationAccount.address,
+                            publicKey,
+                            parseFloat(amount) * Math.pow(10, selectedToken.decimals)
+                        )
+                    );
+                    await sendAndConfirmTransaction(transaction, connection);
+                } catch (error) {
+                    //else create destination account and then send transaction
+                    if (error instanceof TokenAccountNotFoundError) {
+                        const userConfirmed = await confirmAction();
+                        if (!userConfirmed) {
+                            throw error;
+                        }
+                        let ata = await getAssociatedTokenAddress(
+                            new PublicKey(selectedToken.mintAddress), // mint
+                            new PublicKey(walletAddress), // owner
+                            false // allow owner off curve
+                        );
+                        console.log(`ata: ${ata.toBase58()}`);
+                        const tx = new Transaction().add(
+                            createAssociatedTokenAccountInstruction(
+                                publicKey, // payer
+                                ata, // ata
+                                new PublicKey(walletAddress), // owner
+                                new PublicKey(selectedToken.mintAddress)
+                            )
+                        );
+                        console.log(`create ata txhash: ${await sendAndConfirmTransaction(tx, connection)}`);
+                        //create destination account and then send transaction
+                        let destinationAccount = await getOrCreateAssociatedTokenAccount(
+                            connection,
+                            Keypair.generate(),
+                            new PublicKey(selectedToken.mintAddress),
+                            new PublicKey(walletAddress)
+                        );
+                        console.log(`Destination Account: ${destinationAccount.address.toString()}`);
+                        const transaction = new Transaction();
+                        transaction.add(
+                            createTransferInstruction(
+                                sourceAccount.address,
+                                destinationAccount.address,
+                                publicKey,
+                                parseFloat(amount) * Math.pow(10, selectedToken.decimals)
+                            )
+                        );
+                        await sendAndConfirmTransaction(transaction, connection);
+                    }
+                }
+            } catch (error) {
+                setStatus({
+                    status: 'error',
+                    severity: 'error',
+                    message: `Transaction failed!`,
+                });
+            }
+        }
+    };
 
     
     // const { connection } = useConnection();
